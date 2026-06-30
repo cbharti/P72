@@ -15,10 +15,10 @@ HF_SPACE = "multimodalart/wan-2-2-first-last-frame"
 OUTPUT_PATH = "output/village_walk.mp4"
 
 PROMPT = (
-    "A man in simple clothes walks slowly down a cobblestone path "
+    "A man in simple clothes walks toward the camera down a cobblestone path "
     "through a peaceful European village at golden hour. Stone cottages "
-    "with flower boxes line the narrow street. Warm sunlight, gentle "
-    "camera tracking shot following from behind, cinematic realism, "
+    "with flower boxes line the narrow street. Warm sunlight on his face, "
+    "front-facing view, gentle steady camera, cinematic realism, "
     "natural walking motion."
 )
 
@@ -26,6 +26,42 @@ PROMPT = (
 def download_video(url: str, path: str) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     urllib.request.urlretrieve(url, path)
+
+
+def create_video_from_keyframes(
+    start_image: str, end_image: str, output_path: str, duration: int = 5
+) -> None:
+    """Crossfade between two keyframes with a slow zoom-in (walking toward camera)."""
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    fps = 25
+    half = duration / 2
+    fade = 0.8
+    offset = half - fade / 2
+    frames = int(duration * fps)
+    half_frames = int(half * fps)
+    filter_complex = (
+        f"[0:v]scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,"
+        f"zoompan=z='min(1+on*0.0006,1.08)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
+        f"d={half_frames}:s=1920x1080:fps={fps}[v0];"
+        f"[1:v]scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,"
+        f"zoompan=z='min(1.04+on*0.0006,1.12)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
+        f"d={half_frames}:s=1920x1080:fps={fps}[v1];"
+        f"[v0][v1]xfade=transition=fade:duration={fade}:offset={offset},"
+        f"fps={fps},format=yuv420p[v]"
+    )
+    subprocess.run(
+        [
+            "ffmpeg", "-y",
+            "-loop", "1", "-t", str(half), "-i", start_image,
+            "-loop", "1", "-t", str(half), "-i", end_image,
+            "-filter_complex", filter_complex,
+            "-map", "[v]", "-t", str(duration),
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+            output_path,
+        ],
+        check=True,
+        capture_output=True,
+    )
 
 
 def create_video_from_image(image_path: str, output_path: str, duration: int = 5) -> None:
@@ -119,15 +155,31 @@ def main() -> None:
         if not os.path.isfile(args.start_image):
             print(f"Error: image not found: {args.start_image}", file=sys.stderr)
             sys.exit(1)
-        print(f"Creating video from image: {args.start_image}")
-        create_video_from_image(args.start_image, args.output, int(args.duration))
+        if os.path.isfile(args.end_image) and args.end_image != args.start_image:
+            print(f"Creating video from keyframes: {args.start_image} -> {args.end_image}")
+            create_video_from_keyframes(
+                args.start_image, args.end_image, args.output, int(args.duration)
+            )
+        else:
+            print(f"Creating video from image: {args.start_image}")
+            create_video_from_image(args.start_image, args.output, int(args.duration))
         print(f"Saved to {args.output}")
     elif args.backend == "hf":
         for path in (args.start_image, args.end_image):
             if not os.path.isfile(path):
                 print(f"Error: image not found: {path}", file=sys.stderr)
                 sys.exit(1)
-        generate_with_huggingface(args.start_image, args.end_image, args.output, args.duration)
+        try:
+            generate_with_huggingface(args.start_image, args.end_image, args.output, args.duration)
+        except Exception as exc:
+            if "ZeroGPU quota" in str(exc) or "quota" in str(exc).lower():
+                print("HF quota exceeded, falling back to ffmpeg keyframe blend...")
+                create_video_from_keyframes(
+                    args.start_image, args.end_image, args.output, int(args.duration)
+                )
+                print(f"Saved to {args.output}")
+            else:
+                raise
     else:
         generate_with_replicate(args.model, args.output, int(args.duration))
 
